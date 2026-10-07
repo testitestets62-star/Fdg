@@ -1,0 +1,97 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build GitHub Browser APK
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Find project (unzips it if the repo only holds a .zip)
+        id: proj
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+            echo "Gradle project found in repo root."
+            echo "dir=." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "No Gradle project in repo root - looking for a project .zip ..."
+          chosen=""
+          while IFS= read -r z; do
+            listing="$(unzip -Z1 "$z" 2>/dev/null || true)"
+            if grep -qE '(^|/)settings\.gradle(\.kts)?$' <<<"$listing"; then
+              chosen="$z"
+            fi
+          done < <(find . -maxdepth 2 -type f -iname '*.zip' -not -path './.git/*' | LC_ALL=C sort)
+
+          if [ -z "$chosen" ]; then
+            echo "ERROR: no settings.gradle(.kts) in the repo and no .zip containing one."
+            echo "Repo contents:"
+            find . -maxdepth 3 -not -path './.git/*' | sort
+            exit 1
+          fi
+
+          echo "Unpacking: $chosen"
+          rm -rf _project
+          mkdir -p _project
+          unzip -q "$chosen" -d _project
+
+          if [ -f _project/settings.gradle.kts ] || [ -f _project/settings.gradle ]; then
+            dir="_project"
+          else
+            settings="$(find _project -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) -print -quit)"
+            dir="$(dirname "$settings")"
+          fi
+
+          echo "Project directory: $dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Install Gradle 8.7
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="8.7"
+          curl -fL --retry 5 --retry-all-errors "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" -o "$RUNNER_TEMP/gradle.zip"
+          rm -rf "$RUNNER_TEMP/gradle"
+          mkdir -p "$RUNNER_TEMP/gradle"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle"
+          echo "$RUNNER_TEMP/gradle/gradle-${VERSION}/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gradle/gradle-${VERSION}/bin/gradle" --version
+
+      - name: Build Debug APK
+        shell: bash
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: gradle :app:assembleDebug --stacktrace --no-daemon --console=plain
+
+      - name: Show generated APK
+        if: always()
+        shell: bash
+        run: find . -type f -name '*.apk' -print || true
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GitHubBrowser-debug-apk
+          path: ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
